@@ -42,7 +42,7 @@ async function initializeSheets() {
   }
 }
 
-initializeSheets();
+// initializeSheets();
 
 // Process incoming WhatsApp messages
 app.post('/whatsapp', async (req, res) => {
