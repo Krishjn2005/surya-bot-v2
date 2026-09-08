@@ -1,15 +1,6 @@
 {
   "buildCommand": "npm install",
   "devCommand": "node server.js",
-  "env": [
-    "TWILIO_ACCOUNT_SID",
-    "TWILIO_AUTH_TOKEN",
-    "TWILIO_WHATSAPP_NUMBER",
-    "CLAUDE_API_KEY",
-    "MANAGER_PHONE",
-    "GOOGLE_SHEET_ID",
-    "GOOGLE_SERVICE_ACCOUNT"
-  ],
   "functions": {
     "server.js": {
       "memory": 3008,
