@@ -188,8 +188,8 @@ async function sendWhatsAppMessage(to, message) {
 
 // Manager dashboard endpoint
 app.get('/dashboard', async (req, res) => {
-  const registrations = await registrationSheet.getRows();
-  const complaints = await complaintsSheet.getRows();
+  const registrations = registrationSheet ? await registrationSheet.getRows() : [];
+  const complaints = complaintsSheet ? await complaintsSheet.getRows() : [];
 
   const html = `
     <!DOCTYPE html>
