@@ -1,16 +1,4 @@
 {
   "buildCommand": "npm install",
-  "devCommand": "node server.js",
-  "functions": {
-    "server.js": {
-      "memory": 1024,
-      "maxDuration": 30
-    }
-  },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/server.js"
-    }
-  ]
+  "devCommand": "node server.js"
 }
