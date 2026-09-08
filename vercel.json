@@ -3,7 +3,7 @@
   "devCommand": "node server.js",
   "functions": {
     "server.js": {
-      "memory": 3008,
+      "memory": 1024,
       "maxDuration": 30
     }
   },
