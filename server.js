@@ -7,6 +7,7 @@ require('dotenv').config();
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 
+// Root redirect
 app.get('/', (req, res) => {
   res.redirect('/dashboard');
 });
@@ -19,33 +20,38 @@ const anthropic = new Anthropic({
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
 const MANAGER_PHONE = process.env.MANAGER_PHONE;
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const GOOGLE_SERVICE_ACCOUNT = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+const GOOGLE_SERVICE_ACCOUNT = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT || '{}');
 
 let doc;
 let registrationSheet, approvedSheet, complaintsSheet;
 
 // Initialize Google Sheets
 async function initializeSheets() {
-  doc = new GoogleSpreadsheet(SHEET_ID);
-  await doc.useServiceAccountAuth(GOOGLE_SERVICE_ACCOUNT);
-  await doc.loadInfo();
+  try {
+    doc = new GoogleSpreadsheet(SHEET_ID);
+    await doc.useServiceAccountAuth(GOOGLE_SERVICE_ACCOUNT);
+    await doc.loadInfo();
 
-  registrationSheet = doc.sheetsByTitle['Registrations'] || await doc.addSheet({ title: 'Registrations' });
-  approvedSheet = doc.sheetsByTitle['Approved Residents'] || await doc.addSheet({ title: 'Approved Residents' });
-  complaintsSheet = doc.sheetsByTitle['Complaints'] || await doc.addSheet({ title: 'Complaints' });
+    registrationSheet = doc.sheetsByTitle['Registrations'] || await doc.addSheet({ title: 'Registrations' });
+    approvedSheet = doc.sheetsByTitle['Approved Residents'] || await doc.addSheet({ title: 'Approved Residents' });
+    complaintsSheet = doc.sheetsByTitle['Complaints'] || await doc.addSheet({ title: 'Complaints' });
 
-  // Add headers if empty
-  if (registrationSheet.rowCount === 1 && !registrationSheet.headerValues.length) {
-    await registrationSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Status', 'Timestamp']);
-  }
-  if (approvedSheet.rowCount === 1 && !approvedSheet.headerValues.length) {
-    await approvedSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Approved Date']);
-  }
-  if (complaintsSheet.rowCount === 1 && !complaintsSheet.headerValues.length) {
-    await complaintsSheet.setHeaderRow(['Flat', 'Phone', 'Name', 'Issue Type', 'Description', 'Status', 'Timestamp']);
+    // Add headers if empty
+    if (registrationSheet.rowCount === 1 && !registrationSheet.headerValues.length) {
+      await registrationSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Status', 'Timestamp']);
+    }
+    if (approvedSheet.rowCount === 1 && !approvedSheet.headerValues.length) {
+      await approvedSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Approved Date']);
+    }
+    if (complaintsSheet.rowCount === 1 && !complaintsSheet.headerValues.length) {
+      await complaintsSheet.setHeaderRow(['Flat', 'Phone', 'Name', 'Issue Type', 'Description', 'Status', 'Timestamp']);
+    }
+  } catch (error) {
+    console.error('Error initializing sheets:', error);
   }
 }
 
+// Temporarily disabled - uncomment when Google Sheets is properly configured
 // initializeSheets();
 
 // Process incoming WhatsApp messages
@@ -55,7 +61,7 @@ app.post('/whatsapp', async (req, res) => {
 
   try {
     // Check if user is approved
-    const approvedRows = await approvedSheet.getRows();
+    const approvedRows = approvedSheet ? await approvedSheet.getRows() : [];
     const isApproved = approvedRows.some(row => row.Phone === from);
 
     if (isApproved) {
@@ -75,7 +81,6 @@ app.post('/whatsapp', async (req, res) => {
 
 // Registration flow
 async function handleRegistration(from, messageBody) {
-  // Parse: "My name is Amit, flat 405, phone 9876543210"
   const nameMatch = messageBody.match(/name\s+(?:is\s+)?([^,]+)/i);
   const flatMatch = messageBody.match(/flat\s+([^,]+)/i);
   const phoneMatch = messageBody.match(/phone\s+(\d+)/);
@@ -86,13 +91,15 @@ async function handleRegistration(from, messageBody) {
     const phone = phoneMatch[1];
 
     // Add to registration sheet (pending approval)
-    await registrationSheet.addRow({
-      Phone: from,
-      Name: name,
-      Flat: flat,
-      Status: 'Pending',
-      Timestamp: new Date().toISOString(),
-    });
+    if (registrationSheet) {
+      await registrationSheet.addRow({
+        Phone: from,
+        Name: name,
+        Flat: flat,
+        Status: 'Pending',
+        Timestamp: new Date().toISOString(),
+      });
+    }
 
     // Reply to resident
     await sendWhatsAppMessage(
@@ -116,7 +123,7 @@ async function handleRegistration(from, messageBody) {
 // Complaint filing for approved residents
 async function handleComplaintFiling(from, messageBody) {
   // Get resident info
-  const approvedRows = await approvedSheet.getRows();
+  const approvedRows = approvedSheet ? await approvedSheet.getRows() : [];
   const resident = approvedRows.find(row => row.Phone === from);
 
   if (!resident) {
@@ -138,15 +145,17 @@ async function handleComplaintFiling(from, messageBody) {
   }
 
   // Log complaint
-  await complaintsSheet.addRow({
-    Flat: resident.Flat,
-    Phone: from,
-    Name: resident.Name,
-    'Issue Type': complaintType,
-    Description: description,
-    Status: 'Pending',
-    Timestamp: new Date().toISOString(),
-  });
+  if (complaintsSheet) {
+    await complaintsSheet.addRow({
+      Flat: resident.Flat,
+      Phone: from,
+      Name: resident.Name,
+      'Issue Type': complaintType,
+      Description: description,
+      Status: 'Pending',
+      Timestamp: new Date().toISOString(),
+    });
+  }
 
   // Reply to resident (in Hinglish)
   await sendWhatsAppMessage(
@@ -163,30 +172,39 @@ async function handleComplaintFiling(from, messageBody) {
 
 // Use Claude to understand Hinglish complaints
 async function processComplaintWithClaude(message) {
-  const response = await anthropic.messages.create({
-    model: 'claude-opus-4-1',
-    max_tokens: 100,
-    messages: [
-      {
-        role: 'user',
-        content: `You are a complaint analyzer for a society. Understand this Hinglish/Hindi complaint and summarize it clearly in English. Keep it short (one line). Return ONLY the summary, nothing else.\n\nComplaint: "${message}"`,
-      },
-    ],
-  });
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-1',
+      max_tokens: 100,
+      messages: [
+        {
+          role: 'user',
+          content: `You are a complaint analyzer for a society. Understand this Hinglish/Hindi complaint and summarize it clearly in English. Keep it short (one line). Return ONLY the summary, nothing else.\n\nComplaint: "${message}"`,
+        },
+      ],
+    });
 
-  return response.content[0].type === 'text' ? response.content[0].text : message;
+    return response.content[0].type === 'text' ? response.content[0].text : message;
+  } catch (error) {
+    console.error('Claude API error:', error);
+    return message;
+  }
 }
 
 // Send WhatsApp message
 async function sendWhatsAppMessage(to, message) {
-  await client.messages.create({
-    body: message,
-    from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
-    to: `whatsapp:${to}`,
-  });
+  try {
+    await client.messages.create({
+      body: message,
+      from: `whatsapp:${TWILIO_WHATSAPP_NUMBER}`,
+      to: `whatsapp:${to}`,
+    });
+  } catch (error) {
+    console.error('Error sending message:', error);
+  }
 }
 
-// Manager dashboard endpoint
+// Beautiful Modern Dashboard
 app.get('/dashboard', async (req, res) => {
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -213,9 +231,6 @@ app.get('/dashboard', async (req, res) => {
     th { padding: 15px; text-align: left; font-weight: 600; color: #1a1a2e; font-size: 14px; border-bottom: 2px solid #e9ecef; }
     td { padding: 15px; border-bottom: 1px solid #e9ecef; color: #333; }
     tr:hover { background: #f8f9fa; }
-    .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
-    .status-pending { background: #fff3cd; color: #856404; }
-    .status-resolved { background: #d4edda; color: #155724; }
     .btn { padding: 8px 16px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; }
     .btn-approve { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; margin-right: 8px; }
     .btn-approve:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(17, 153, 142, 0.3); }
@@ -228,6 +243,7 @@ app.get('/dashboard', async (req, res) => {
     .modal-buttons button { flex: 1; padding: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
     .modal-buttons .confirm { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
     .modal-buttons .cancel { background: #eee; color: #333; }
+    @media (max-width: 768px) { .section { padding: 20px; } th, td { padding: 10px; font-size: 13px; } .header h1 { font-size: 22px; } }
   </style>
 </head>
 <body>
@@ -250,7 +266,7 @@ app.get('/dashboard', async (req, res) => {
           <tr><th>Name</th><th>Flat</th><th>Phone</th><th>Date</th><th>Action</th></tr>
         </thead>
         <tbody>
-          <tr><td colspan="5" class="empty-state"><h3>✨ No pending registrations</h3></td></tr>
+          <tr><td colspan="5" class="empty-state"><h3>✨ No pending registrations</h3><p>New registration requests will appear here</p></td></tr>
         </tbody>
       </table>
     </div>
@@ -262,7 +278,7 @@ app.get('/dashboard', async (req, res) => {
           <tr><th>Flat</th><th>Resident</th><th>Issue</th><th>Type</th><th>Date</th><th>Action</th></tr>
         </thead>
         <tbody>
-          <tr><td colspan="6" class="empty-state"><h3>✨ No active complaints</h3></td></tr>
+          <tr><td colspan="6" class="empty-state"><h3>✨ No active complaints</h3><p>Resident complaints will appear here as they submit them</p></td></tr>
         </tbody>
       </table>
     </div>
@@ -276,51 +292,65 @@ app.get('/dashboard', async (req, res) => {
 app.post('/api/approve', async (req, res) => {
   const { flat, phone } = req.body;
 
-  // Move from registration to approved
-  const registrations = await registrationSheet.getRows();
-  const registration = registrations.find(r => r.Flat === flat);
+  try {
+    if (!registrationSheet || !approvedSheet) {
+      return res.status(500).send('Database not initialized');
+    }
 
-  if (registration) {
-    await approvedSheet.addRow({
-      Phone: phone,
-      Name: registration.Name,
-      Flat: flat,
-      'Approved Date': new Date().toISOString(),
-    });
+    const registrations = await registrationSheet.getRows();
+    const registration = registrations.find(r => r.Flat === flat);
 
-    // Remove from registration sheet (update status instead)
-    registration.Status = 'Approved';
-    await registration.save();
+    if (registration) {
+      await approvedSheet.addRow({
+        Phone: phone,
+        Name: registration.Name,
+        Flat: flat,
+        'Approved Date': new Date().toISOString(),
+      });
 
-    // Notify resident
-    await sendWhatsAppMessage(
-      phone,
-      `✅ Great news, Flat ${flat}! Your registration has been approved. You can now file complaints and inquiries. 🎉\n\nJust text your issue (e.g., "Gym AC kharab hai", "Plumber chahiye") and we'll help!`
-    );
+      registration.Status = 'Approved';
+      await registration.save();
+
+      await sendWhatsAppMessage(
+        phone,
+        `✅ Great news, Flat ${flat}! Your registration has been approved. You can now file complaints and inquiries. 🎉\n\nJust text your issue (e.g., "Gym AC kharab hai", "Plumber chahiye") and we'll help!`
+      );
+    }
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Error approving resident:', error);
+    res.status(500).send('Error');
   }
-
-  res.status(200).send('OK');
 });
 
 // API to resolve complaint
 app.post('/api/resolve', async (req, res) => {
   const { flat } = req.body;
 
-  const complaints = await complaintsSheet.getRows();
-  const complaint = complaints.find(c => c.Flat === flat && c.Status !== 'Resolved');
+  try {
+    if (!complaintsSheet) {
+      return res.status(500).send('Database not initialized');
+    }
 
-  if (complaint) {
-    complaint.Status = 'Resolved';
-    await complaint.save();
+    const complaints = await complaintsSheet.getRows();
+    const complaint = complaints.find(c => c.Flat === flat && c.Status !== 'Resolved');
 
-    // Notify resident
-    await sendWhatsAppMessage(
-      complaint.Phone,
-      `✅ Your complaint for Flat ${flat} has been resolved! Thank you for reporting. 🙏`
-    );
+    if (complaint) {
+      complaint.Status = 'Resolved';
+      await complaint.save();
+
+      await sendWhatsAppMessage(
+        complaint.Phone,
+        `✅ Your complaint for Flat ${flat} has been resolved! Thank you for reporting. 🙏`
+      );
+    }
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Error resolving complaint:', error);
+    res.status(500).send('Error');
   }
-
-  res.status(200).send('OK');
 });
 
 const PORT = process.env.PORT || 3000;
