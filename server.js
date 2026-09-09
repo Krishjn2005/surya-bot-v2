@@ -188,107 +188,87 @@ async function sendWhatsAppMessage(to, message) {
 
 // Manager dashboard endpoint
 app.get('/dashboard', async (req, res) => {
-  const registrations = registrationSheet ? await registrationSheet.getRows() : [];
-  const complaints = complaintsSheet ? await complaintsSheet.getRows() : [];
-
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Surya Prakash Residency - Manager Dashboard</title>
-      <style>
-        body { font-family: Arial; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        h1 { color: #333; }
-        .section { background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #1F4788; color: white; }
-        tr:hover { background: #f9f9f9; }
-        .pending { color: orange; font-weight: bold; }
-        .approved { color: green; font-weight: bold; }
-        .button { padding: 8px 16px; background: #1F4788; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        .button:hover { background: #153060; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>🏢 Surya Prakash Residency - Manager Dashboard</h1>
-
-        <div class="section">
-          <h2>📋 Pending Registrations</h2>
-          <table>
-            <tr>
-              <th>Name</th>
-              <th>Flat</th>
-              <th>Phone</th>
-              <th>Status</th>
-              <th>Action</th>
-            </tr>
-            ${registrations.filter(r => r.Status === 'Pending').map(r => `
-              <tr>
-                <td>${r.Name}</td>
-                <td>${r.Flat}</td>
-                <td>${r.Phone}</td>
-                <td><span class="pending">${r.Status}</span></td>
-                <td>
-                  <button class="button" onclick="approveResident('${r.Flat}', '${r.Phone}')">Approve</button>
-                </td>
-              </tr>
-            `).join('')}
-          </table>
-        </div>
-
-        <div class="section">
-          <h2>⚠️ Active Complaints</h2>
-          <table>
-            <tr>
-              <th>Flat</th>
-              <th>Resident</th>
-              <th>Issue</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Date</th>
-              <th>Action</th>
-            </tr>
-            ${complaints.filter(c => c.Status !== 'Resolved').map(c => `
-              <tr>
-                <td>${c.Flat}</td>
-                <td>${c.Name}</td>
-                <td>${c.Description}</td>
-                <td>${c['Issue Type']}</td>
-                <td>${c.Status}</td>
-                <td>${new Date(c.Timestamp).toLocaleDateString()}</td>
-                <td>
-                  <button class="button" onclick="resolveComplaint('${c.Flat}')">Resolve</button>
-                </td>
-              </tr>
-            `).join('')}
-          </table>
-        </div>
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Surya Prakash Residency - Manager Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    .header { background: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
+    .header h1 { color: #1a1a2e; font-size: 28px; margin-bottom: 5px; }
+    .header p { color: #666; font-size: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
+    .stat-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+    .stat-card h3 { font-size: 12px; opacity: 0.9; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+    .stat-card .number { font-size: 32px; font-weight: bold; }
+    .section { background: white; padding: 30px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
+    .section h2 { color: #1a1a2e; font-size: 22px; margin-bottom: 25px; display: flex; align-items: center; gap: 10px; }
+    .section h2::before { content: ''; display: inline-block; width: 4px; height: 24px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 2px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: #f8f9fa; }
+    th { padding: 15px; text-align: left; font-weight: 600; color: #1a1a2e; font-size: 14px; border-bottom: 2px solid #e9ecef; }
+    td { padding: 15px; border-bottom: 1px solid #e9ecef; color: #333; }
+    tr:hover { background: #f8f9fa; }
+    .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+    .status-pending { background: #fff3cd; color: #856404; }
+    .status-resolved { background: #d4edda; color: #155724; }
+    .btn { padding: 8px 16px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; }
+    .btn-approve { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; margin-right: 8px; }
+    .btn-approve:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(17, 153, 142, 0.3); }
+    .btn-resolve { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
+    .empty-state { text-align: center; padding: 60px 20px; color: #999; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); justify-content: center; align-items: center; z-index: 1000; }
+    .modal.active { display: flex; }
+    .modal-content { background: white; padding: 30px; border-radius: 12px; max-width: 400px; text-align: center; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); }
+    .modal-buttons { display: flex; gap: 10px; margin-top: 20px; justify-content: center; }
+    .modal-buttons button { flex: 1; padding: 10px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .modal-buttons .confirm { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
+    .modal-buttons .cancel { background: #eee; color: #333; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🏢 Surya Prakash Residency</h1>
+      <p>Manager Dashboard • WhatsApp Complaint Management System</p>
+      <div class="stats">
+        <div class="stat-card"><h3>Pending Approvals</h3><div class="number">0</div></div>
+        <div class="stat-card"><h3>Active Complaints</h3><div class="number">0</div></div>
+        <div class="stat-card"><h3>Approved Residents</h3><div class="number">0</div></div>
+        <div class="stat-card"><h3>Resolved</h3><div class="number">0</div></div>
       </div>
+    </div>
 
-      <script>
-        function approveResident(flat, phone) {
-          fetch('/api/approve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ flat, phone })
-          }).then(() => location.reload());
-        }
+    <div class="section">
+      <h2>📋 Pending Registrations</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Flat</th><th>Phone</th><th>Date</th><th>Action</th></tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5" class="empty-state"><h3>✨ No pending registrations</h3></td></tr>
+        </tbody>
+      </table>
+    </div>
 
-        function resolveComplaint(flat) {
-          fetch('/api/resolve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ flat })
-          }).then(() => location.reload());
-        }
-      </script>
-    </body>
-    </html>
-  `;
-
+    <div class="section">
+      <h2>⚠️ Active Complaints</h2>
+      <table>
+        <thead>
+          <tr><th>Flat</th><th>Resident</th><th>Issue</th><th>Type</th><th>Date</th><th>Action</th></tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="6" class="empty-state"><h3>✨ No active complaints</h3></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>`;
   res.send(html);
 });
 
