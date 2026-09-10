@@ -50,7 +50,7 @@ async function initializeSheets() {
   }
 }
 
-initializeSheets();
+// initializeSheets();
 
 app.post('/whatsapp', async (req, res) => {
   const from = req.body.From.replace('whatsapp:', '');
