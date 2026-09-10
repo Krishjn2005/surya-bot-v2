@@ -43,19 +43,21 @@ async function initializeSheets() {
     if (complaintsSheet.rowCount === 1 && !complaintsSheet.headerValues.length) {
       await complaintsSheet.setHeaderRow(['Flat', 'Phone', 'Name', 'Issue Type', 'Description', 'Status', 'Timestamp']);
     }
+
+    console.log('Google Sheets initialized successfully');
   } catch (error) {
-    console.error('Error initializing sheets:', error);
+    console.error('Error initializing sheets:', error.message);
   }
 }
 
-// initializeSheets();
+initializeSheets();
 
 app.post('/whatsapp', async (req, res) => {
   const from = req.body.From.replace('whatsapp:', '');
   const messageBody = req.body.Body.trim();
 
   try {
-    const approvedRows = approvedSheet ? await approvedSheet.getRows() : [];
+    const approvedRows = await approvedSheet.getRows();
     const isApproved = approvedRows.some(row => row.Phone === from);
 
     if (isApproved) {
@@ -81,15 +83,13 @@ async function handleRegistration(from, messageBody) {
     const flat = flatMatch[1].trim();
     const phone = phoneMatch[1];
 
-    if (registrationSheet) {
-      await registrationSheet.addRow({
-        Phone: from,
-        Name: name,
-        Flat: flat,
-        Status: 'Pending',
-        Timestamp: new Date().toISOString(),
-      });
-    }
+    await registrationSheet.addRow({
+      Phone: from,
+      Name: name,
+      Flat: flat,
+      Status: 'Pending',
+      Timestamp: new Date().toISOString(),
+    });
 
     await sendWhatsAppMessage(
       from,
@@ -109,7 +109,7 @@ async function handleRegistration(from, messageBody) {
 }
 
 async function handleComplaintFiling(from, messageBody) {
-  const approvedRows = approvedSheet ? await approvedSheet.getRows() : [];
+  const approvedRows = await approvedSheet.getRows();
   const resident = approvedRows.find(row => row.Phone === from);
 
   if (!resident) {
@@ -128,17 +128,15 @@ async function handleComplaintFiling(from, messageBody) {
     complaintType = 'Amenity';
   }
 
-  if (complaintsSheet) {
-    await complaintsSheet.addRow({
-      Flat: resident.Flat,
-      Phone: from,
-      Name: resident.Name,
-      'Issue Type': complaintType,
-      Description: description,
-      Status: 'Pending',
-      Timestamp: new Date().toISOString(),
-    });
-  }
+  await complaintsSheet.addRow({
+    Flat: resident.Flat,
+    Phone: from,
+    Name: resident.Name,
+    'Issue Type': complaintType,
+    Description: description,
+    Status: 'Pending',
+    Timestamp: new Date().toISOString(),
+  });
 
   await sendWhatsAppMessage(
     from,
@@ -184,7 +182,16 @@ async function sendWhatsAppMessage(to, message) {
 }
 
 app.get('/dashboard', async (req, res) => {
-  const html = `<!DOCTYPE html>
+  try {
+    const registrations = await registrationSheet.getRows();
+    const approved = await approvedSheet.getRows();
+    const complaints = await complaintsSheet.getRows();
+
+    const pendingRegs = registrations.filter(r => r.Status === 'Pending');
+    const activeComplaints = complaints.filter(c => c.Status !== 'Resolved');
+    const resolvedComplaints = complaints.filter(c => c.Status === 'Resolved');
+
+    const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -362,16 +369,8 @@ app.get('/dashboard', async (req, res) => {
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.4px;
-    }
-
-    .status-pending {
       background-color: #f0f0f0;
       color: #666;
-    }
-
-    .status-active {
-      background-color: #f0f0f0;
-      color: #333;
     }
 
     .modal {
@@ -487,19 +486,19 @@ app.get('/dashboard', async (req, res) => {
     <div class="stats-grid">
       <div class="stat-card">
         <h3>Pending Approvals</h3>
-        <div class="number">0</div>
+        <div class="number">${pendingRegs.length}</div>
       </div>
       <div class="stat-card">
         <h3>Active Complaints</h3>
-        <div class="number">0</div>
+        <div class="number">${activeComplaints.length}</div>
       </div>
       <div class="stat-card">
         <h3>Approved Residents</h3>
-        <div class="number">0</div>
+        <div class="number">${approved.length}</div>
       </div>
       <div class="stat-card">
         <h3>Resolved This Month</h3>
-        <div class="number">0</div>
+        <div class="number">${resolvedComplaints.length}</div>
       </div>
     </div>
 
@@ -516,12 +515,24 @@ app.get('/dashboard', async (req, res) => {
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td colspan="5" class="empty-state">
-              <h3>No pending requests</h3>
-              <p>Registration requests will appear here</p>
-            </td>
-          </tr>
+          ${pendingRegs.length === 0 ? `
+            <tr>
+              <td colspan="5" class="empty-state">
+                <h3>No pending requests</h3>
+                <p>Registration requests will appear here</p>
+              </td>
+            </tr>
+          ` : pendingRegs.map(reg => `
+            <tr>
+              <td>${reg.Name}</td>
+              <td>${reg.Flat}</td>
+              <td>${reg.Phone}</td>
+              <td>${new Date(reg.Timestamp).toLocaleDateString()}</td>
+              <td>
+                <button class="btn btn-approve" onclick="approveResident('${reg.Flat}', '${reg.Phone}', '${reg.Name}')">Approve</button>
+              </td>
+            </tr>
+          `).join('')}
         </tbody>
       </table>
     </div>
@@ -540,12 +551,25 @@ app.get('/dashboard', async (req, res) => {
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td colspan="6" class="empty-state">
-              <h3>No active complaints</h3>
-              <p>Complaints will appear here</p>
-            </td>
-          </tr>
+          ${activeComplaints.length === 0 ? `
+            <tr>
+              <td colspan="6" class="empty-state">
+                <h3>No active complaints</h3>
+                <p>Complaints will appear here</p>
+              </td>
+            </tr>
+          ` : activeComplaints.map(comp => `
+            <tr>
+              <td>${comp.Flat}</td>
+              <td>${comp.Name}</td>
+              <td>${comp.Description}</td>
+              <td>${comp['Issue Type']}</td>
+              <td>${new Date(comp.Timestamp).toLocaleDateString()}</td>
+              <td>
+                <button class="btn btn-resolve" onclick="resolveComplaint('${comp.Flat}', '${comp.Name}')">Resolve</button>
+              </td>
+            </tr>
+          `).join('')}
         </tbody>
       </table>
     </div>
@@ -610,17 +634,18 @@ app.get('/dashboard', async (req, res) => {
   </script>
 </body>
 </html>`;
-  res.send(html);
+
+    res.send(html);
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).send('Error loading dashboard');
+  }
 });
 
 app.post('/api/approve', async (req, res) => {
   const { flat, phone } = req.body;
 
   try {
-    if (!registrationSheet || !approvedSheet) {
-      return res.status(500).send('Database not initialized');
-    }
-
     const registrations = await registrationSheet.getRows();
     const registration = registrations.find(r => r.Flat === flat);
 
@@ -652,10 +677,6 @@ app.post('/api/resolve', async (req, res) => {
   const { flat } = req.body;
 
   try {
-    if (!complaintsSheet) {
-      return res.status(500).send('Database not initialized');
-    }
-
     const complaints = await complaintsSheet.getRows();
     const complaint = complaints.find(c => c.Flat === flat && c.Status !== 'Resolved');
 
