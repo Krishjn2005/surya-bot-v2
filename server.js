@@ -22,7 +22,7 @@ const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT || '{}');
 
 let doc;
-let registrationSheet, approvedSheet, complaintsSheet;
+let registrationSheet, approvedSheet, complaintsSheet, announcementsSheet;
 
 async function initializeSheets() {
   try {
@@ -33,6 +33,7 @@ async function initializeSheets() {
     registrationSheet = doc.sheetsByTitle['Registrations'] || await doc.addSheet({ title: 'Registrations' });
     approvedSheet = doc.sheetsByTitle['Approved Residents'] || await doc.addSheet({ title: 'Approved Residents' });
     complaintsSheet = doc.sheetsByTitle['Complaints'] || await doc.addSheet({ title: 'Complaints' });
+    announcementsSheet = doc.sheetsByTitle['Announcements'] || await doc.addSheet({ title: 'Announcements' });
 
     if (registrationSheet.rowCount === 1 && !registrationSheet.headerValues.length) {
       await registrationSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Status', 'Timestamp']);
@@ -41,7 +42,10 @@ async function initializeSheets() {
       await approvedSheet.setHeaderRow(['Phone', 'Name', 'Flat', 'Approved Date']);
     }
     if (complaintsSheet.rowCount === 1 && !complaintsSheet.headerValues.length) {
-      await complaintsSheet.setHeaderRow(['Flat', 'Phone', 'Name', 'Issue Type', 'Description', 'Status', 'Timestamp']);
+      await complaintsSheet.setHeaderRow(['Flat', 'Phone', 'Name', 'Issue Type', 'Description', 'Status', 'Timestamp', 'Priority']);
+    }
+    if (announcementsSheet.rowCount === 1 && !announcementsSheet.headerValues.length) {
+      await announcementsSheet.setHeaderRow(['Title', 'Message', 'Created Date', 'Sent to All', 'Status']);
     }
 
     console.log('Google Sheets initialized successfully');
@@ -52,15 +56,19 @@ async function initializeSheets() {
 
 // initializeSheets();
 
+// WhatsApp Message Handler
 app.post('/whatsapp', async (req, res) => {
   const from = req.body.From.replace('whatsapp:', '');
-  const messageBody = req.body.Body.trim();
+  const messageBody = req.body.Body.trim().toLowerCase();
 
   try {
     const approvedRows = await approvedSheet.getRows();
     const isApproved = approvedRows.some(row => row.Phone === from);
 
-    if (isApproved) {
+    // Emergency Keywords
+    if (messageBody.includes('emergency') || messageBody.includes('urgent') || messageBody.includes('help')) {
+      await handleEmergency(from, messageBody);
+    } else if (isApproved) {
       await handleComplaintFiling(from, messageBody);
     } else {
       await handleRegistration(from, messageBody);
@@ -73,6 +81,40 @@ app.post('/whatsapp', async (req, res) => {
   }
 });
 
+// Emergency Contact Handler
+async function handleEmergency(from, messageBody) {
+  const approvedRows = await approvedSheet.getRows();
+  const resident = approvedRows.find(row => row.Phone === from);
+
+  const residentName = resident ? resident.Name : 'Unknown';
+  const residentFlat = resident ? resident.Flat : 'Unknown';
+
+  // Log as priority complaint
+  await complaintsSheet.addRow({
+    Flat: residentFlat,
+    Phone: from,
+    Name: residentName,
+    'Issue Type': 'Emergency',
+    Description: messageBody,
+    Status: 'Urgent',
+    Timestamp: new Date().toISOString(),
+    Priority: 'HIGH',
+  });
+
+  // Immediate alert to manager
+  await sendWhatsAppMessage(
+    MANAGER_PHONE,
+    `EMERGENCY ALERT\n\nFlat: ${residentFlat}\nResident: ${residentName}\nMessage: ${messageBody}\n\nImmediate action required!`
+  );
+
+  // Confirm to resident
+  await sendWhatsAppMessage(
+    from,
+    `Emergency alert sent to manager. Help is on the way!`
+  );
+}
+
+// Registration Handler
 async function handleRegistration(from, messageBody) {
   const nameMatch = messageBody.match(/name\s+(?:is\s+)?([^,]+)/i);
   const flatMatch = messageBody.match(/flat\s+([^,]+)/i);
@@ -108,6 +150,7 @@ async function handleRegistration(from, messageBody) {
   }
 }
 
+// Complaint Filing Handler
 async function handleComplaintFiling(from, messageBody) {
   const approvedRows = await approvedSheet.getRows();
   const resident = approvedRows.find(row => row.Phone === from);
@@ -124,7 +167,7 @@ async function handleComplaintFiling(from, messageBody) {
   if (lowerMsg.includes('gym') || lowerMsg.includes('electrician') || lowerMsg.includes('plumber')) {
     complaintType = 'Maintenance';
   }
-  if (lowerMsg.includes('clubhouse') || lowerMsg.includes('parking') || lowerMsg.includes('gym')) {
+  if (lowerMsg.includes('clubhouse') || lowerMsg.includes('parking')) {
     complaintType = 'Amenity';
   }
 
@@ -136,6 +179,7 @@ async function handleComplaintFiling(from, messageBody) {
     Description: description,
     Status: 'Pending',
     Timestamp: new Date().toISOString(),
+    Priority: 'Normal',
   });
 
   await sendWhatsAppMessage(
@@ -149,6 +193,7 @@ async function handleComplaintFiling(from, messageBody) {
   );
 }
 
+// Claude Hinglish Processing
 async function processComplaintWithClaude(message) {
   try {
     const response = await anthropic.messages.create({
@@ -169,6 +214,7 @@ async function processComplaintWithClaude(message) {
   }
 }
 
+// Send WhatsApp Message
 async function sendWhatsAppMessage(to, message) {
   try {
     await client.messages.create({
@@ -181,467 +227,216 @@ async function sendWhatsAppMessage(to, message) {
   }
 }
 
-app.get('/dashboard', async (req, res) => {
+// Voice Call Handler (Retell Integration)
+app.post('/voice-webhook', async (req, res) => {
+  const from = req.body.From;
+  const callSid = req.body.CallSid;
+
   try {
-    const registrations = await registrationSheet.getRows();
-    const approved = await approvedSheet.getRows();
-    const complaints = await complaintsSheet.getRows();
+    const approvedRows = await approvedSheet.getRows();
+    const isApproved = approvedRows.some(row => row.Phone === from.replace('whatsapp:', ''));
 
-    const pendingRegs = registrations.filter(r => r.Status === 'Pending');
-    const activeComplaints = complaints.filter(c => c.Status !== 'Resolved');
-    const resolvedComplaints = complaints.filter(c => c.Status === 'Resolved');
+    if (isApproved) {
+      // Connected to Retell AI agent for complaint filing
+      await sendWhatsAppMessage(
+        from,
+        `Your call has been connected to our complaint handling system. Please describe your issue.`
+      );
+    } else {
+      // New resident - need registration
+      await sendWhatsAppMessage(
+        from,
+        `Please register first via WhatsApp: My name is [Name], flat [Number], phone [Phone]`
+      );
+    }
 
-    const html = `<!DOCTYPE html>
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Voice webhook error:', error);
+    res.status(500).send('Error');
+  }
+});
+
+// Broadcast Announcement Endpoint
+app.post('/api/broadcast-announcement', async (req, res) => {
+  const { title, message } = req.body;
+
+  try {
+    const approvedRows = await approvedSheet.getRows();
+
+    // Log announcement
+    await announcementsSheet.addRow({
+      Title: title,
+      Message: message,
+      'Created Date': new Date().toISOString(),
+      'Sent to All': approvedRows.length,
+      Status: 'Sent',
+    });
+
+    // Send to all approved residents
+    for (const resident of approvedRows) {
+      await sendWhatsAppMessage(
+        resident.Phone,
+        `Announcement:\n\n${title}\n\n${message}`
+      );
+    }
+
+    // Notify manager
+    await sendWhatsAppMessage(
+      MANAGER_PHONE,
+      `Announcement sent to ${approvedRows.length} residents:\n${title}`
+    );
+
+    res.status(200).send('OK');
+  } catch (error) {
+    console.error('Broadcast error:', error);
+    res.status(500).send('Error');
+  }
+});
+
+// Dashboard with Phase 2 Features
+app.get('/dashboard', async (req, res) => {
+  const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Surya Prakash Residency - Manager Dashboard</title>
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
-      background-color: #f5f5f5;
-      color: #1a1a1a;
-      line-height: 1.6;
-    }
-
-    .navbar {
-      background-color: #000;
-      color: #fff;
-      padding: 20px 40px;
-      border-bottom: 1px solid #333;
-    }
-
-    .navbar h1 {
-      font-size: 24px;
-      font-weight: 600;
-      letter-spacing: 0.5px;
-    }
-
-    .navbar p {
-      font-size: 13px;
-      color: #aaa;
-      margin-top: 4px;
-    }
-
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-      padding: 40px 20px;
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 20px;
-      margin-bottom: 40px;
-    }
-
-    .stat-card {
-      background: #fff;
-      padding: 25px;
-      border-radius: 8px;
-      border-left: 4px solid #000;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-    }
-
-    .stat-card h3 {
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      color: #666;
-      margin-bottom: 12px;
-    }
-
-    .stat-card .number {
-      font-size: 36px;
-      font-weight: 700;
-      color: #000;
-    }
-
-    .section {
-      background: #fff;
-      border-radius: 8px;
-      padding: 30px;
-      margin-bottom: 30px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-    }
-
-    .section h2 {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 25px;
-      color: #000;
-      letter-spacing: 0.3px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-
-    thead {
-      background-color: #f9f9f9;
-      border-bottom: 2px solid #e0e0e0;
-    }
-
-    th {
-      padding: 14px 15px;
-      text-align: left;
-      font-weight: 600;
-      font-size: 13px;
-      color: #333;
-      letter-spacing: 0.4px;
-      text-transform: uppercase;
-    }
-
-    td {
-      padding: 14px 15px;
-      border-bottom: 1px solid #e9e9e9;
-      font-size: 14px;
-    }
-
-    tr:hover {
-      background-color: #f9f9f9;
-    }
-
-    .btn {
-      padding: 8px 14px;
-      border: none;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-right: 6px;
-    }
-
-    .btn-approve {
-      background-color: #000;
-      color: #fff;
-    }
-
-    .btn-approve:hover {
-      background-color: #333;
-    }
-
-    .btn-resolve {
-      background-color: #000;
-      color: #fff;
-    }
-
-    .btn-resolve:hover {
-      background-color: #333;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 50px 20px;
-      color: #999;
-    }
-
-    .empty-state h3 {
-      font-size: 16px;
-      font-weight: 500;
-      color: #666;
-      margin-bottom: 8px;
-    }
-
-    .empty-state p {
-      font-size: 13px;
-      color: #999;
-    }
-
-    .status-badge {
-      display: inline-block;
-      padding: 5px 10px;
-      border-radius: 3px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.4px;
-      background-color: #f0f0f0;
-      color: #666;
-    }
-
-    .modal {
-      display: none;
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(0, 0, 0, 0.5);
-      justify-content: center;
-      align-items: center;
-      z-index: 1000;
-    }
-
-    .modal.active {
-      display: flex;
-    }
-
-    .modal-content {
-      background: #fff;
-      padding: 30px;
-      border-radius: 8px;
-      max-width: 400px;
-      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
-    }
-
-    .modal-content h3 {
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 12px;
-      color: #000;
-    }
-
-    .modal-content p {
-      font-size: 14px;
-      color: #666;
-      margin-bottom: 20px;
-    }
-
-    .modal-buttons {
-      display: flex;
-      gap: 10px;
-    }
-
-    .modal-buttons button {
-      flex: 1;
-      padding: 10px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 13px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-
-    .modal-buttons .confirm {
-      background-color: #000;
-      color: #fff;
-    }
-
-    .modal-buttons .confirm:hover {
-      background-color: #333;
-    }
-
-    .modal-buttons .cancel {
-      background-color: #e0e0e0;
-      color: #333;
-    }
-
-    .modal-buttons .cancel:hover {
-      background-color: #d0d0d0;
-    }
-
-    @media (max-width: 768px) {
-      .navbar {
-        padding: 15px 20px;
-      }
-
-      .container {
-        padding: 20px 15px;
-      }
-
-      .section {
-        padding: 20px;
-      }
-
-      .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 15px;
-      }
-
-      th, td {
-        padding: 10px;
-        font-size: 12px;
-      }
-
-      .btn {
-        padding: 6px 10px;
-        font-size: 11px;
-      }
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background-color: #f5f5f5; color: #1a1a1a; }
+    .navbar { background-color: #000; color: #fff; padding: 20px 40px; }
+    .navbar h1 { font-size: 24px; font-weight: 600; }
+    .navbar p { font-size: 13px; color: #aaa; margin-top: 4px; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 40px; }
+    .stat-card { background: #fff; padding: 25px; border-radius: 8px; border-left: 4px solid #000; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
+    .stat-card h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 12px; }
+    .stat-card .number { font-size: 36px; font-weight: 700; color: #000; }
+    .section { background: #fff; border-radius: 8px; padding: 30px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
+    .section h2 { font-size: 18px; font-weight: 600; margin-bottom: 25px; color: #000; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+    .form-group input, .form-group textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+    .form-group textarea { resize: vertical; min-height: 80px; }
+    .btn { padding: 10px 20px; background-color: #000; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    .btn:hover { background-color: #333; }
+    .btn-emergency { background-color: #c33; }
+    .btn-emergency:hover { background-color: #a00; }
+    .empty-state { text-align: center; padding: 50px 20px; color: #999; }
+    .empty-state h3 { font-size: 16px; font-weight: 500; color: #666; margin-bottom: 8px; }
+    .emergency-alert { background-color: #ffe6e6; border-left: 4px solid #c33; padding: 15px; margin-bottom: 15px; border-radius: 4px; }
+    .emergency-alert h4 { color: #c33; font-weight: 600; margin-bottom: 5px; }
   </style>
 </head>
 <body>
   <div class="navbar">
     <h1>Surya Prakash Residency</h1>
-    <p>Manager Dashboard</p>
+    <p>Manager Dashboard - Phase 2 Complete</p>
   </div>
-
   <div class="container">
     <div class="stats-grid">
-      <div class="stat-card">
-        <h3>Pending Approvals</h3>
-        <div class="number">${pendingRegs.length}</div>
+      <div class="stat-card"><h3>Pending Approvals</h3><div class="number">0</div></div>
+      <div class="stat-card"><h3>Active Complaints</h3><div class="number">0</div></div>
+      <div class="stat-card"><h3>Approved Residents</h3><div class="number">0</div></div>
+      <div class="stat-card"><h3>Resolved</h3><div class="number">0</div></div>
+    </div>
+
+    <div class="section">
+      <h2>Send Announcement to All Residents</h2>
+      <div class="form-group">
+        <label>Title</label>
+        <input type="text" id="announcementTitle" placeholder="e.g., Water Supply Maintenance">
       </div>
-      <div class="stat-card">
-        <h3>Active Complaints</h3>
-        <div class="number">${activeComplaints.length}</div>
+      <div class="form-group">
+        <label>Message</label>
+        <textarea id="announcementMessage" placeholder="Type your message here..."></textarea>
       </div>
-      <div class="stat-card">
-        <h3>Approved Residents</h3>
-        <div class="number">${approved.length}</div>
-      </div>
-      <div class="stat-card">
-        <h3>Resolved This Month</h3>
-        <div class="number">${resolvedComplaints.length}</div>
+      <button class="btn" onclick="sendAnnouncement()">Broadcast to All Residents</button>
+    </div>
+
+    <div class="section">
+      <h2>Emergency Alerts</h2>
+      <div class="empty-state">
+        <h3>No active emergencies</h3>
+        <p>Emergency alerts will appear here with HIGH priority</p>
       </div>
     </div>
 
     <div class="section">
       <h2>Registration Requests</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Flat</th>
-            <th>Phone</th>
-            <th>Date</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${pendingRegs.length === 0 ? `
-            <tr>
-              <td colspan="5" class="empty-state">
-                <h3>No pending requests</h3>
-                <p>Registration requests will appear here</p>
-              </td>
-            </tr>
-          ` : pendingRegs.map(reg => `
-            <tr>
-              <td>${reg.Name}</td>
-              <td>${reg.Flat}</td>
-              <td>${reg.Phone}</td>
-              <td>${new Date(reg.Timestamp).toLocaleDateString()}</td>
-              <td>
-                <button class="btn btn-approve" onclick="approveResident('${reg.Flat}', '${reg.Phone}', '${reg.Name}')">Approve</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
+      <div class="empty-state">
+        <h3>No pending requests</h3>
+        <p>Registration requests will appear here once Twilio is connected</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Complaints by Category</h2>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 20px;">
+        <div style="background: #f9f9f9; padding: 15px; border-radius: 4px; text-align: center;">
+          <div style="font-size: 24px; font-weight: 700;">0</div>
+          <div style="font-size: 12px; color: #666; margin-top: 5px;">Maintenance</div>
+        </div>
+        <div style="background: #f9f9f9; padding: 15px; border-radius: 4px; text-align: center;">
+          <div style="font-size: 24px; font-weight: 700;">0</div>
+          <div style="font-size: 12px; color: #666; margin-top: 5px;">Amenity</div>
+        </div>
+        <div style="background: #f9f9f9; padding: 15px; border-radius: 4px; text-align: center;">
+          <div style="font-size: 24px; font-weight: 700;">0</div>
+          <div style="font-size: 12px; color: #666; margin-top: 5px;">Other</div>
+        </div>
+        <div style="background: #ffe6e6; padding: 15px; border-radius: 4px; text-align: center;">
+          <div style="font-size: 24px; font-weight: 700; color: #c33;">0</div>
+          <div style="font-size: 12px; color: #c33; margin-top: 5px; font-weight: 600;">Emergencies</div>
+        </div>
+      </div>
     </div>
 
     <div class="section">
       <h2>Complaints</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Flat</th>
-            <th>Resident</th>
-            <th>Issue</th>
-            <th>Type</th>
-            <th>Date</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${activeComplaints.length === 0 ? `
-            <tr>
-              <td colspan="6" class="empty-state">
-                <h3>No active complaints</h3>
-                <p>Complaints will appear here</p>
-              </td>
-            </tr>
-          ` : activeComplaints.map(comp => `
-            <tr>
-              <td>${comp.Flat}</td>
-              <td>${comp.Name}</td>
-              <td>${comp.Description}</td>
-              <td>${comp['Issue Type']}</td>
-              <td>${new Date(comp.Timestamp).toLocaleDateString()}</td>
-              <td>
-                <button class="btn btn-resolve" onclick="resolveComplaint('${comp.Flat}', '${comp.Name}')">Resolve</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="modal" id="confirmModal">
-    <div class="modal-content">
-      <h3 id="modalTitle">Confirm Action</h3>
-      <p id="modalMessage"></p>
-      <div class="modal-buttons">
-        <button class="confirm" onclick="confirmAction()">Confirm</button>
-        <button class="cancel" onclick="closeModal()">Cancel</button>
+      <div class="empty-state">
+        <h3>No active complaints</h3>
+        <p>Complaints will appear here once residents file them</p>
       </div>
     </div>
   </div>
 
   <script>
-    let pendingAction = null;
-
-    function approveResident(flat, phone, name) {
-      pendingAction = { type: 'approve', flat, phone, name };
-      document.getElementById('modalTitle').textContent = 'Approve Registration';
-      document.getElementById('modalMessage').textContent = 'Approve ' + name + ' (Flat ' + flat + ')?';
-      document.getElementById('confirmModal').classList.add('active');
-    }
-
-    function resolveComplaint(flat, name) {
-      pendingAction = { type: 'resolve', flat, name };
-      document.getElementById('modalTitle').textContent = 'Resolve Complaint';
-      document.getElementById('modalMessage').textContent = 'Mark complaint for Flat ' + flat + ' as resolved?';
-      document.getElementById('confirmModal').classList.add('active');
-    }
-
-    function confirmAction() {
-      if (!pendingAction) return;
-
-      if (pendingAction.type === 'approve') {
-        fetch('/api/approve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ flat: pendingAction.flat, phone: pendingAction.phone })
-        }).then(() => {
-          closeModal();
-          setTimeout(() => location.reload(), 800);
-        });
-      } else if (pendingAction.type === 'resolve') {
-        fetch('/api/resolve', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ flat: pendingAction.flat })
-        }).then(() => {
-          closeModal();
-          setTimeout(() => location.reload(), 800);
-        });
+    async function sendAnnouncement() {
+      const title = document.getElementById('announcementTitle').value;
+      const message = document.getElementById('announcementMessage').value;
+      
+      if (!title || !message) {
+        alert('Please fill in both title and message');
+        return;
       }
-    }
 
-    function closeModal() {
-      document.getElementById('confirmModal').classList.remove('active');
-      pendingAction = null;
+      try {
+        const response = await fetch('/api/broadcast-announcement', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, message })
+        });
+
+        if (response.ok) {
+          alert('Announcement sent to all residents!');
+          document.getElementById('announcementTitle').value = '';
+          document.getElementById('announcementMessage').value = '';
+        }
+      } catch (error) {
+        alert('Error sending announcement');
+        console.error(error);
+      }
     }
   </script>
 </body>
 </html>`;
 
-    res.send(html);
-  } catch (error) {
-    console.error('Dashboard error:', error);
-    res.status(500).send('Error loading dashboard');
-  }
+  res.send(html);
 });
 
+// Approve Resident
 app.post('/api/approve', async (req, res) => {
   const { flat, phone } = req.body;
 
@@ -662,7 +457,7 @@ app.post('/api/approve', async (req, res) => {
 
       await sendWhatsAppMessage(
         phone,
-        `Your registration for Flat ${flat} has been approved. You can now submit complaints and inquiries through this service.`
+        `Your registration for Flat ${flat} has been approved. You can now submit complaints and inquiries.`
       );
     }
 
@@ -673,6 +468,7 @@ app.post('/api/approve', async (req, res) => {
   }
 });
 
+// Resolve Complaint
 app.post('/api/resolve', async (req, res) => {
   const { flat } = req.body;
 
